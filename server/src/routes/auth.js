@@ -27,7 +27,13 @@ router.post('/register', async (req, res) => {
     // Determine role based on secret code
     let role = 'user';
     if (staffSecret) {
-      const configStaffSecret = (process.env.STAFF_SECRET || 'GymStaffSecret2026').trim();
+      let configStaffSecret = (process.env.STAFF_SECRET || 'GymStaffSecret2026').trim();
+      // Remove any surrounding single or double quotes (e.g. from copy-pasting into env settings)
+      if ((configStaffSecret.startsWith('"') && configStaffSecret.endsWith('"')) ||
+          (configStaffSecret.startsWith("'") && configStaffSecret.endsWith("'"))) {
+        configStaffSecret = configStaffSecret.slice(1, -1).trim();
+      }
+
       if (staffSecret.trim().toLowerCase() === configStaffSecret.toLowerCase()) {
         role = 'staff';
       } else {
