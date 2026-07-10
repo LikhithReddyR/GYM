@@ -20,10 +20,14 @@ const getPlanDetails = (plan) => {
   }
 };
 
-// Initialize Razorpay instance if keys are configured
-let razorpay;
-const isMockMode = process.env.MOCK_PAYMENT_MODE === 'true';
+// Determine if running in mock payment mode
+const isMockMode = 
+  process.env.MOCK_PAYMENT_MODE === 'true' || 
+  !process.env.RAZORPAY_KEY_ID || 
+  process.env.RAZORPAY_KEY_ID.includes('mock');
 
+// Initialize Razorpay instance if keys are configured and not in mock mode
+let razorpay;
 if (!isMockMode && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
   try {
     razorpay = new Razorpay({
