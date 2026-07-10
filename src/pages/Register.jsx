@@ -115,6 +115,9 @@ const Register = ({ onToggleLogin }) => {
               <p style={{ fontSize: '0.75rem', color: 'var(--color-text-dim)', marginTop: '4px' }}>
                 For local testing use: <code style={{ color: '#ffffff' }}>GymStaffSecret2026</code>
               </p>
+              <p style={{ fontSize: '0.75rem', color: 'var(--color-warning)', marginTop: '4px' }}>
+                Note: This code is only for registering your account. Once registered, log in using your Email Address and Password.
+              </p>
             </div>
           )}
 

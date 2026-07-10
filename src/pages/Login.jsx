@@ -72,11 +72,16 @@ const Login = ({ onToggleRegister }) => {
           </button>
         </form>
 
-        <div className="auth-footer">
-          <span>New to GigaGym? </span>
-          <a href="#" className="auth-link" onClick={(e) => { e.preventDefault(); onToggleRegister(); }}>
-            Create an account
-          </a>
+        <div className="auth-footer" style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '20px' }}>
+          <div style={{ fontSize: '0.8rem', color: 'var(--color-text-dim)', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '12px' }}>
+            Staff / Admin: Log in using your registered email and password. (If you haven't registered yet, please create an account first).
+          </div>
+          <div>
+            <span>New to GigaGym? </span>
+            <a href="#" className="auth-link" onClick={(e) => { e.preventDefault(); onToggleRegister(); }}>
+              Create an account
+            </a>
+          </div>
         </div>
       </div>
     </div>
