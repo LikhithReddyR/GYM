@@ -2,7 +2,17 @@ import React, { createContext, useState, useEffect, useContext } from 'react';
 
 const AuthContext = createContext();
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+// Clean up/validate the API Base URL to handle potential deployment setup issues
+// (e.g. copy-pasted comments, space/parentheses, or "undefined" strings)
+let resolvedApiUrl = import.meta.env.VITE_API_BASE_URL || '';
+if (!resolvedApiUrl || resolvedApiUrl.includes('(') || resolvedApiUrl.includes(' ') || resolvedApiUrl === 'undefined') {
+  if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+    resolvedApiUrl = 'http://localhost:5000/api';
+  } else {
+    resolvedApiUrl = '/api';
+  }
+}
+const API_BASE_URL = resolvedApiUrl;
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
