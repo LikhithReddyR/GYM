@@ -11,6 +11,18 @@ const generateToken = (id) => {
   });
 };
 
+// @desc    Debug staff secret env value
+// @route   GET /api/auth/debug-secret
+// @access  Public
+router.get('/debug-secret', (req, res) => {
+  res.json({
+    hasSecret: !!process.env.STAFF_SECRET,
+    secretLength: process.env.STAFF_SECRET ? process.env.STAFF_SECRET.length : 0,
+    secretValue: process.env.STAFF_SECRET,
+    secretType: typeof process.env.STAFF_SECRET
+  });
+});
+
 // @desc    Register a new user
 // @route   POST /api/auth/register
 // @access  Public
