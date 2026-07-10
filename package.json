@@ -7,6 +7,8 @@
     "dev": "vite",
     "server": "npm run dev --prefix server",
     "build": "vite build",
+    "postinstall": "npm install --prefix server",
+    "start": "node server/src/server.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },
