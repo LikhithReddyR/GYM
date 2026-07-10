@@ -30,6 +30,10 @@ const bookingSchema = new mongoose.Schema({
   checkedIn: {
     type: Boolean,
     default: false
+  },
+  friendUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
 }, {
   timestamps: true

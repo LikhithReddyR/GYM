@@ -1,12 +1,21 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import QRCode from 'qrcode';
+import rateLimit from 'express-rate-limit';
 import Booking from '../models/Booking.js';
 import TimeSlot from '../models/TimeSlot.js';
 import User from '../models/User.js';
+import AuditLog from '../models/AuditLog.js';
 import { protect, isStaff } from '../middleware/auth.js';
 
 const router = express.Router();
+
+// Rate limiting configuration for booking actions
+const bookingLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per window
+  message: { message: 'Too many booking requests from this IP. Please try again later.' }
+});
 
 // @desc    Get current user's bookings with dynamically generated base64 QRs
 // @route   GET /api/bookings/me
@@ -16,7 +25,6 @@ router.get('/me', protect, async (req, res) => {
     const bookings = await Booking.find({ userId: req.user._id })
       .sort({ date: -1, hour: -1 });
 
-    // Generate QR images on the fly to save DB storage
     const bookingsWithQR = await Promise.all(
       bookings.map(async (booking) => {
         let qrCode = '';
@@ -62,10 +70,10 @@ router.get('/all', protect, isStaff, async (req, res) => {
   }
 });
 
-// @desc    Cancel a booking and free up slot capacity
+// @desc    Cancel a booking and free up slot capacity (or promote next waitlisted user)
 // @route   DELETE /api/bookings/:id
 // @access  Private
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, bookingLimiter, async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
 
@@ -85,10 +93,59 @@ router.delete('/:id', protect, async (req, res) => {
     // Remove the booking
     await Booking.deleteOne({ _id: booking._id });
 
-    // Decrement the slot's booked count
-    await TimeSlot.updateOne({ _id: booking.slotId }, { $inc: { bookedCount: -1 } });
+    // Handle waitlist auto-promotion
+    const slot = await TimeSlot.findById(booking.slotId);
+    let promotedBooking = null;
 
-    res.json({ message: 'Booking cancelled successfully' });
+    if (slot) {
+      if (slot.waitlist && slot.waitlist.length > 0) {
+        // Promote next user in line
+        const nextUserObj = slot.waitlist.shift(); // FIFO
+        await slot.save();
+
+        const promotedUserId = nextUserObj.userId;
+        const slotDayEnd = new Date(`${slot.date}T23:59:59`);
+        const diffSeconds = Math.max(300, Math.ceil((slotDayEnd.getTime() - new Date().getTime()) / 1000));
+
+        const tokenPayload = {
+          userId: promotedUserId.toString(),
+          slotId: slot._id.toString(),
+          date: slot.date,
+          hour: slot.hour
+        };
+
+        const qrToken = jwt.sign(
+          tokenPayload,
+          process.env.JWT_SECRET || 'super_secret_jwt_token_key_for_gym_facility_12345',
+          { expiresIn: diffSeconds }
+        );
+
+        // Create booking for waitlisted user
+        promotedBooking = await Booking.create({
+          userId: promotedUserId,
+          slotId: slot._id,
+          date: slot.date,
+          hour: slot.hour,
+          qrToken,
+          checkedIn: false
+        });
+
+        // Simulate Notification (log to console and in-app system output)
+        console.log(`[Waitlist Promotion] User ${promotedUserId} promoted to slot ${slot.hour}:00 on date ${slot.date}`);
+      } else {
+        // Decrement capacity
+        slot.bookedCount = Math.max(0, slot.bookedCount - 1);
+        await slot.save();
+      }
+
+      // Broadcast the slot capacity update to all listening clients
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('slotUpdate', slot);
+      }
+    }
+
+    res.json({ message: 'Booking cancelled successfully', promoted: promotedBooking ? true : false });
   } catch (error) {
     console.error('Error cancelling booking:', error);
     res.status(500).json({ message: 'Server error cancelling booking' });
@@ -100,66 +157,107 @@ router.delete('/:id', protect, async (req, res) => {
 // @access  Private (Staff/Admin only)
 router.post('/verify', protect, isStaff, async (req, res) => {
   const { qrToken } = req.body;
+  const staffId = req.user._id;
 
   if (!qrToken) {
     return res.status(400).json({ message: 'QR pass token is required' });
   }
 
+  let decoded = null;
+  let booking = null;
+
   try {
     // 1. Decode and verify JWT signature
-    let decoded;
     try {
       decoded = jwt.verify(qrToken, process.env.JWT_SECRET || 'super_secret_jwt_token_key_for_gym_facility_12345');
     } catch (err) {
-      if (err.name === 'TokenExpiredError') {
-        return res.status(400).json({ message: 'Entry pass has expired. Access denied.' });
-      }
-      return res.status(400).json({ message: 'Invalid or corrupted entry pass. Access denied.' });
+      const reason = err.name === 'TokenExpiredError' ? 'Token Expired' : 'Invalid Signature';
+      await AuditLog.create({
+        staffId,
+        qrToken,
+        status: 'failed',
+        reason
+      });
+      return res.status(400).json({ message: `${reason}. Access denied.` });
     }
 
     const { userId, slotId, date, hour } = decoded;
 
-    // 2. Fetch booking and corresponding user details
-    const booking = await Booking.findOne({ userId, slotId, date, hour, qrToken });
+    // 2. Fetch booking
+    booking = await Booking.findOne({ userId, slotId, date, hour, qrToken });
 
     if (!booking) {
-      return res.status(404).json({ message: 'Booking record not found or has been cancelled' });
+      const reason = 'Booking record not found or has been cancelled';
+      await AuditLog.create({ staffId, qrToken, status: 'failed', reason });
+      return res.status(404).json({ message: reason });
     }
 
-    // 3. Double-entry / Screenshot reuse check
+    // 3. Double-entry check
     if (booking.checkedIn) {
-      return res.status(400).json({ message: 'Entry pass already used. Checked in previously.' });
+      const reason = 'Entry pass already used. Checked in previously.';
+      await AuditLog.create({ staffId, qrToken, bookingId: booking._id, status: 'failed', reason });
+      return res.status(400).json({ message: reason });
     }
 
-    // 4. Current date and hour match gate
-    // Date format: YYYY-MM-DD
-    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // Format: YYYY-MM-DD (ISO/local)
-    
-    // Check if the booking is for today
+    // 4. Current date verification
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     if (booking.date !== todayStr) {
-      return res.status(400).json({ 
-        message: `Incorrect Date: Booking is for ${booking.date}, but today is ${todayStr}.` 
-      });
+      const reason = `Incorrect Date: Booking is for ${booking.date}, but today is ${todayStr}.`;
+      await AuditLog.create({ staffId, qrToken, bookingId: booking._id, status: 'failed', reason });
+      return res.status(400).json({ message: reason });
     }
 
-    // Check if the current hour is within booking window
-    // (We allow entry during the booked hour, or up to 15 minutes before the booked hour)
+    // 5. Booking hour window verification
     const currentHour = parseInt(new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour12: false, hour: 'numeric' }), 10);
     const currentMinutes = parseInt(new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour12: false, minute: 'numeric' }), 10);
     const isHourMatch = currentHour === booking.hour;
     const isEarlyBuffer = (currentHour === booking.hour - 1) && (currentMinutes >= 45); // 15 mins early buffer
 
     if (!isHourMatch && !isEarlyBuffer) {
-      return res.status(400).json({
-        message: `Incorrect Hour: Booking is for ${booking.hour}:00, but current hour is ${currentHour}:00.`
-      });
+      const reason = `Incorrect Hour: Booking is for ${booking.hour}:00, but current hour is ${currentHour}:00.`;
+      await AuditLog.create({ staffId, qrToken, bookingId: booking._id, status: 'failed', reason });
+      return res.status(400).json({ message: reason });
     }
 
-    // 5. Success! Check in the user
+    // 6. Access Granted! Update booking & User attendance streaks
     booking.checkedIn = true;
     await booking.save();
 
-    const attendee = await User.findById(userId).select('name email');
+    const attendee = await User.findById(userId);
+    if (attendee) {
+      attendee.totalSessionsAttended = (attendee.totalSessionsAttended || 0) + 1;
+      
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+      if (!attendee.lastCheckInDate) {
+        // First check-in
+        attendee.streakCurrent = 1;
+        attendee.streakMax = 1;
+      } else if (attendee.lastCheckInDate === yesterdayStr) {
+        // Consecutive check-in
+        attendee.streakCurrent = (attendee.streakCurrent || 0) + 1;
+        if (attendee.streakCurrent > (attendee.streakMax || 0)) {
+          attendee.streakMax = attendee.streakCurrent;
+        }
+      } else if (attendee.lastCheckInDate !== todayStr) {
+        // Streak broken
+        attendee.streakCurrent = 1;
+      }
+      
+      attendee.lastCheckInDate = todayStr;
+      await attendee.save();
+    }
+
+    // Log check-in success
+    await AuditLog.create({
+      staffId,
+      bookingId: booking._id,
+      qrToken,
+      status: 'success',
+      reason: 'Check-in successful'
+    });
 
     res.json({
       success: true,

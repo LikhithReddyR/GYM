@@ -6,12 +6,21 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import MyBookings from './pages/MyBookings';
 import StaffScanner from './pages/StaffScanner';
+import AdminAnalytics from './pages/AdminAnalytics';
+import { ToastProvider } from './components/Toast';
 import './App.css';
 
 const MainAppContent = () => {
   const { user, loading } = useAuth();
   const [showRegister, setShowRegister] = useState(false);
   const [currentTab, setCurrentTab] = useState('dashboard');
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'dark');
+
+  // Handle HTML data-theme attribute
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
 
   // Handle default views on user login
   useEffect(() => {
@@ -55,12 +64,13 @@ const MainAppContent = () => {
   // Authenticated flow
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <Navbar currentTab={currentTab} setCurrentTab={setCurrentTab} />
+      <Navbar currentTab={currentTab} setCurrentTab={setCurrentTab} theme={theme} setTheme={setTheme} />
       
       <main style={{ flexGrow: 1 }}>
         {currentTab === 'dashboard' && user.role === 'user' && <Dashboard />}
         {currentTab === 'bookings' && user.role === 'user' && <MyBookings />}
         {currentTab === 'scanner' && (user.role === 'staff' || user.role === 'admin') && <StaffScanner />}
+        {currentTab === 'analytics' && user.role === 'admin' && <AdminAnalytics />}
       </main>
 
       <footer style={{
@@ -81,7 +91,9 @@ const MainAppContent = () => {
 function App() {
   return (
     <AuthProvider>
-      <MainAppContent />
+      <ToastProvider>
+        <MainAppContent />
+      </ToastProvider>
     </AuthProvider>
   );
 }

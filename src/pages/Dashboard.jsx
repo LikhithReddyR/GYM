@@ -1,9 +1,27 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { CalendarIcon, ClockIcon, ZapIcon, CheckIcon } from '../components/Icons';
+import { useToast } from '../components/Toast';
+import { io } from 'socket.io-client';
+
+const DashboardSkeleton = () => {
+  return (
+    <div className="slots-grid">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <div key={i} className="glass-card slot-card" style={{ padding: '20px', minHeight: '160px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div className="skeleton" style={{ height: '24px', width: '60%' }}></div>
+          <div className="skeleton" style={{ height: '14px', width: '80%' }}></div>
+          <div className="skeleton" style={{ height: '6px', width: '100%', borderRadius: '3px' }}></div>
+          <div className="skeleton" style={{ height: '42px', width: '100%', borderRadius: '8px', marginTop: 'auto' }}></div>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const Dashboard = () => {
-  const { user, apiCall } = useAuth();
+  const { user, apiCall, token } = useAuth();
+  const toast = useToast();
   
   // Date states
   const todayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
@@ -22,9 +40,22 @@ const Dashboard = () => {
   const [paymentModal, setPaymentModal] = useState(null); // { order, plan }
   const [paymentStatus, setPaymentStatus] = useState(''); // 'success' | 'failure' | ''
   const [confirmationModal, setConfirmationModal] = useState(null); // { date, hour, qrCode }
-  const [alert, setAlert] = useState(null); // { type, message }
 
   const pollIntervalRef = useRef(null);
+
+  // Generate next 7 days list starting from today
+  const getNext7Days = () => {
+    const list = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() + i);
+      const yyyyMmDd = d.toLocaleDateString('en-CA'); // YYYY-MM-DD format
+      const weekdayStr = d.toLocaleDateString(undefined, { weekday: 'short' });
+      const dayNum = d.getDate();
+      list.push({ dateStr: yyyyMmDd, weekday: weekdayStr, dayNum });
+    }
+    return list;
+  };
 
   const fetchMembership = async () => {
     try {
@@ -72,22 +103,56 @@ const Dashboard = () => {
     }
   };
 
-  // Initial load and calendar changes
+  // Initial load and selectedDate changes
   useEffect(() => {
     fetchMembership();
     fetchMyBookings();
     fetchSlots(selectedDate, true);
 
-    // Setup periodic polling every 8s to keep slot counts live
+    // Setup periodic polling every 12s as a fallback to keep slot counts live
     pollIntervalRef.current = setInterval(() => {
       fetchSlots(selectedDate, false);
       fetchMyBookings();
-    }, 8000);
+    }, 12000);
 
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, [selectedDate]);
+
+  // Real-time updates via Socket.io
+  useEffect(() => {
+    // Resolve base socket URL
+    let resolvedApiUrl = import.meta.env.VITE_API_BASE_URL || '';
+    if (!resolvedApiUrl || resolvedApiUrl.includes('(') || resolvedApiUrl.includes(' ') || resolvedApiUrl === 'undefined') {
+      if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+        resolvedApiUrl = 'http://localhost:5000/api';
+      } else {
+        resolvedApiUrl = '/api';
+      }
+    }
+    const socketUrl = resolvedApiUrl.replace('/api', '') || window.location.origin;
+
+    const socket = io(socketUrl, {
+      auth: { token }
+    });
+
+    socket.on('connect', () => {
+      console.log('[Socket] Connected to real-time updates server');
+    });
+
+    socket.on('slotUpdate', (updatedSlot) => {
+      if (updatedSlot.date === selectedDate) {
+        setSlots(prevSlots =>
+          prevSlots.map(s => s._id === updatedSlot._id ? updatedSlot : s)
+        );
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [selectedDate, token]);
 
   // Helper to load Razorpay checkout script
   const loadRazorpay = () => {
@@ -107,7 +172,7 @@ const Dashboard = () => {
   // Handle plan purchase
   const handlePurchase = async (plan) => {
     try {
-      showAlert('info', 'Initializing payment checkout...');
+      toast.info('Initializing payment checkout...');
       const res = await apiCall('/membership/create-order', {
         method: 'POST',
         body: JSON.stringify({ plan })
@@ -127,7 +192,7 @@ const Dashboard = () => {
         // Real Razorpay integration
         const loaded = await loadRazorpay();
         if (!loaded) {
-          showAlert('error', 'Razorpay SDK failed to load. Use mock payment mode instead.');
+          toast.error('Razorpay SDK failed to load. Use mock payment mode instead.');
           return;
         }
 
@@ -160,7 +225,7 @@ const Dashboard = () => {
       }
 
     } catch (err) {
-      showAlert('error', err.message);
+      toast.error(err.message);
     }
   };
 
@@ -177,10 +242,10 @@ const Dashboard = () => {
         throw new Error(data.message || 'Payment verification failed');
       }
 
-      showAlert('success', 'Payment verified! Membership is now active.');
+      toast.success('Payment verified! Membership is now active.');
       fetchMembership();
     } catch (err) {
-      showAlert('error', err.message);
+      toast.error(err.message);
     }
   };
 
@@ -191,7 +256,7 @@ const Dashboard = () => {
       setTimeout(() => {
         setPaymentModal(null);
         setPaymentStatus('');
-        showAlert('error', 'Payment simulated failure. Subscription was not activated.');
+        toast.error('Payment simulated failure. Subscription was not activated.');
       }, 1500);
       return;
     }
@@ -211,18 +276,52 @@ const Dashboard = () => {
     }, 1500);
   };
 
-  // Handle slot booking
+  // Handle slot booking (Optimistic Update with friend tagging option)
   const handleBookSlot = async (slotId, hour) => {
     if (!membership || membership.status !== 'active') {
-      showAlert('error', 'Active membership required to book slots.');
+      toast.error('Active membership required to book slots.');
       setShowPlans(true);
       return;
     }
 
+    let friendEmail = null;
+    const tagFriend = window.confirm('Would you like to tag a registered friend for this gym slot booking?');
+    if (tagFriend) {
+      const email = window.prompt("Enter your friend's registered email address:");
+      if (email) {
+        friendEmail = email.trim();
+      } else {
+        return;
+      }
+    }
+
+    // Save previous state for rollback
+    const previousSlots = [...slots];
+    const previousMyBookings = [...myBookings];
+
+    // Optimistically update
+    const increment = friendEmail ? 2 : 1;
+    setSlots(prevSlots =>
+      prevSlots.map(s =>
+        s._id === slotId ? { ...s, bookedCount: Math.min(s.capacity, s.bookedCount + increment) } : s
+      )
+    );
+
+    const tempBooking = {
+      _id: `temp_${Date.now()}`,
+      slotId,
+      date: selectedDate,
+      hour,
+      checkedIn: false,
+      isTemp: true
+    };
+    setMyBookings(prev => [tempBooking, ...prev]);
     setBookingInProgress(slotId);
+
     try {
       const res = await apiCall(`/slots/${slotId}/book`, {
-        method: 'POST'
+        method: 'POST',
+        body: JSON.stringify({ friendEmail })
       });
 
       const data = await res.json();
@@ -237,19 +336,44 @@ const Dashboard = () => {
         qrCode: data.qrCode
       });
 
-      showAlert('success', 'Slot booked successfully!');
+      toast.success(data.message || 'Slot booked successfully!');
       fetchSlots(selectedDate, false);
       fetchMyBookings();
     } catch (err) {
-      showAlert('error', err.message);
+      // Rollback
+      setSlots(previousSlots);
+      setMyBookings(previousMyBookings);
+      toast.error(err.message);
     } finally {
       setBookingInProgress(null);
     }
   };
 
-  const showAlert = (type, message) => {
-    setAlert({ type, message });
-    setTimeout(() => setAlert(null), 5000);
+  const handleJoinWaitlist = async (slotId) => {
+    if (!membership || membership.status !== 'active') {
+      toast.error('Active membership required to join waitlists.');
+      setShowPlans(true);
+      return;
+    }
+
+    setBookingInProgress(slotId);
+    try {
+      const res = await apiCall(`/slots/${slotId}/waitlist`, {
+        method: 'POST'
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || 'Failed to join waitlist');
+      }
+
+      toast.success(data.message || 'Added to waitlist!');
+      fetchSlots(selectedDate, false);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setBookingInProgress(null);
+    }
   };
 
   const formatHourString = (hr) => {
@@ -269,15 +393,13 @@ const Dashboard = () => {
 
   return (
     <div className="dashboard-container">
-      {/* Dynamic Alerts */}
-      {alert && (
-        <div className={`alert-toast ${alert.type}`} style={{ position: 'fixed', top: '100px', right: '20px', zIndex: 9999 }}>
-          <span>{alert.message}</span>
-        </div>
-      )}
-
       {/* 1. Membership Dashboard Section */}
-      {!loadingMembers && membership && (
+      {loadingMembers ? (
+        <div className="glass-panel" style={{ padding: '24px', marginBottom: '30px' }}>
+          <div className="skeleton" style={{ height: '40px', width: '80%', marginBottom: '10px' }}></div>
+          <div className="skeleton" style={{ height: '20px', width: '50%' }}></div>
+        </div>
+      ) : membership && (
         <div>
           {membership.status === 'active' ? (
             <div className="glass-panel membership-banner" style={{ borderLeft: `6px solid ${getMembershipColor(membership.daysLeft)}` }}>
@@ -313,6 +435,46 @@ const Dashboard = () => {
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* User Streak & Workouts Stats Panel */}
+      {!loadingMembers && user && user.role === 'user' && (
+        <div className="glass-panel" style={{ padding: '24px', marginBottom: '30px', background: 'radial-gradient(circle at top right, rgba(99, 102, 241, 0.08) 0%, var(--bg-glass) 100%)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+          <div>
+            <span className="input-label" style={{ fontSize: '0.75rem' }}>Personal Streak</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' }}>
+              <span style={{ fontSize: '2rem' }}>🔥</span>
+              <div>
+                <h3 style={{ fontSize: '1.4rem', fontWeight: '800', margin: 0, color: 'var(--color-warning)' }}>{membership?.userStreakCurrent || 0} Days</h3>
+                <p style={{ fontSize: '0.75rem', color: 'var(--color-text-dim)', margin: 0 }}>Max Streak: {membership?.userStreakMax || 0} days</p>
+              </div>
+            </div>
+          </div>
+          
+          <div>
+            <span className="input-label" style={{ fontSize: '0.75rem' }}>Total Workouts</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' }}>
+              <span style={{ fontSize: '2rem' }}>💪</span>
+              <div>
+                <h3 style={{ fontSize: '1.4rem', fontWeight: '800', margin: 0, color: 'var(--color-primary)' }}>{membership?.userTotalSessions || 0} Sessions</h3>
+                <p style={{ fontSize: '0.75rem', color: 'var(--color-text-dim)', margin: 0 }}>Total check-ins logged</p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <span className="input-label" style={{ fontSize: '0.75rem' }}>Preferred Hour</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' }}>
+              <span style={{ fontSize: '2rem' }}>🕒</span>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: '800', margin: 0, color: 'var(--color-accent)' }}>
+                  {membership?.mostBookedSlot !== undefined && membership?.mostBookedSlot !== null ? formatHourString(membership.mostBookedSlot) : 'No bookings yet'}
+                </h3>
+                <p style={{ fontSize: '0.75rem', color: 'var(--color-text-dim)', margin: 0 }}>Most-booked time block</p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -371,28 +533,34 @@ const Dashboard = () => {
 
       {/* 2. Slot Grid & Date Picker Section */}
       <div className="glass-panel" style={{ padding: '30px' }}>
-        <div className="date-selector-container">
-          <div>
-            <h2>Gym Training Slots</h2>
-            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginTop: '2px' }}>
-              Select a date. Capacity is strictly limited to 30 members per hour.
-            </p>
-          </div>
-          <div className="date-picker-wrapper">
-            <CalendarIcon style={{ color: 'var(--color-primary)' }} />
-            <input
-              type="date"
-              className="custom-date-input"
-              value={selectedDate}
-              min={todayStr}
-              onChange={(e) => setSelectedDate(e.target.value)}
-            />
-          </div>
+        <div style={{ marginBottom: '20px' }}>
+          <h2>Gym Training Slots</h2>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem', marginTop: '2px' }}>
+            Select a date. Capacity is strictly limited to 30 members per hour.
+          </p>
+        </div>
+
+        {/* Scrollable horizontal date strip */}
+        <div className="date-strip-container">
+          {getNext7Days().map((item) => (
+            <div
+              key={item.dateStr}
+              className={`date-strip-card ${selectedDate === item.dateStr ? 'active' : ''}`}
+              onClick={() => setSelectedDate(item.dateStr)}
+            >
+              <div className="date-weekday">{item.weekday}</div>
+              <div className="date-day">{item.dayNum}</div>
+            </div>
+          ))}
         </div>
 
         {loadingSlots ? (
-          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--color-text-muted)' }}>
-            <div className="animate-pulse" style={{ fontSize: '1.2rem', fontWeight: 600 }}>Loading available slots...</div>
+          <DashboardSkeleton />
+        ) : slots.length === 0 ? (
+          <div className="empty-state-card">
+            <div className="empty-state-icon">🏋️‍♂️</div>
+            <h3 className="empty-state-title">No Slots Available</h3>
+            <p className="empty-state-desc">There are no training blocks seeded for this day.</p>
           </div>
         ) : (
           <div className="slots-grid">
@@ -406,31 +574,57 @@ const Dashboard = () => {
               // Percentage of filled slots
               const fillPercentage = (slot.bookedCount / slot.capacity) * 100;
               
-              // Color category for count indicator
+              // Color-coding by fill levels
               let capColor = 'green';
-              if (spotsLeft <= 5) capColor = 'red';
-              else if (spotsLeft <= 15) capColor = 'amber';
+              let fillBg = 'var(--color-success)';
+              if (isFull) {
+                capColor = 'grey';
+                fillBg = 'var(--color-text-dim)';
+              } else if (fillPercentage >= 80) {
+                capColor = 'red';
+                fillBg = 'var(--color-danger)';
+              } else if (fillPercentage >= 50) {
+                capColor = 'amber';
+                fillBg = 'var(--color-warning)';
+              }
+
+              // Card styling details
+              let cardBorder = 'var(--border-glass)';
+              let cardBg = 'var(--bg-card)';
+              if (isFull) {
+                cardBorder = 'rgba(107, 114, 128, 0.2)';
+                cardBg = 'rgba(26, 32, 46, 0.4)';
+              } else if (isBookedByUser) {
+                cardBorder = 'rgba(34, 211, 238, 0.4)';
+                cardBg = 'linear-gradient(135deg, rgba(34, 211, 238, 0.05), var(--bg-card))';
+              } else if (capColor === 'red') {
+                cardBorder = 'rgba(239, 68, 68, 0.25)';
+              } else if (capColor === 'amber') {
+                cardBorder = 'rgba(245, 158, 11, 0.25)';
+              } else {
+                cardBorder = 'rgba(16, 185, 129, 0.2)';
+              }
 
               return (
-                <div key={slot._id} className={`glass-card slot-card ${isBookedByUser ? 'booked' : ''}`}>
+                <div key={slot._id} className={`glass-card slot-card ${isBookedByUser ? 'booked' : ''}`} style={{ borderColor: cardBorder, background: cardBg }}>
                   <div className="slot-time">{formatHourString(slot.hour)}</div>
                   
                   <div className="slot-capacity-info">
                     <div className="slot-capacity-text">
-                      <span>Status</span>
+                      <span>Capacity</span>
                       <strong style={{ 
-                        color: isFull ? 'var(--color-danger)' : 
+                        color: isFull ? 'var(--color-text-dim)' : 
                                isBookedByUser ? 'var(--color-accent)' : 
                                capColor === 'green' ? 'var(--color-success)' : 
                                capColor === 'amber' ? 'var(--color-warning)' : 'var(--color-danger)'
                       }}>
-                        {isFull ? 'FULLY BOOKED' : isBookedByUser ? 'BOOKED BY YOU' : `${spotsLeft} spots left`}
+                        {isFull ? 'FULLY BOOKED' : isBookedByUser ? 'BOOKED BY YOU' : `${slot.bookedCount}/${slot.capacity} booked`}
                       </strong>
                     </div>
                     <div className="slot-capacity-bar">
                       <div 
                         className={`slot-capacity-fill ${capColor}`}
-                        style={{ width: `${fillPercentage}%` }}
+                        style={{ width: `${fillPercentage}%`, backgroundColor: fillBg }}
                       ></div>
                     </div>
                   </div>
@@ -443,14 +637,32 @@ const Dashboard = () => {
                       <CheckIcon size={16} />
                       Already Reserved
                     </div>
+                  ) : isFull ? (
+                    slot.waitlist && slot.waitlist.some(w => w.userId === user._id) ? (
+                      <button
+                        className="btn btn-secondary"
+                        style={{ width: '100%', border: '1px dashed var(--color-warning)', color: 'var(--color-warning)', cursor: 'default' }}
+                      >
+                        On Waitlist (Position {slot.waitlist.findIndex(w => w.userId === user._id) + 1})
+                      </button>
+                    ) : (
+                      <button
+                        className="btn btn-accent"
+                        style={{ width: '100%' }}
+                        disabled={bookingInProgress !== null}
+                        onClick={() => handleJoinWaitlist(slot._id)}
+                      >
+                        {bookingInProgress === slot._id ? 'Joining Waitlist...' : 'Join Waitlist'}
+                      </button>
+                    )
                   ) : (
                     <button
-                      className={`btn ${isFull ? 'btn-secondary' : 'btn-primary'}`}
+                      className="btn btn-primary"
                       style={{ width: '100%' }}
-                      disabled={isFull || bookingInProgress !== null}
+                      disabled={bookingInProgress !== null}
                       onClick={() => handleBookSlot(slot._id, slot.hour)}
                     >
-                      {bookingInProgress === slot._id ? 'Securing Spot...' : isFull ? 'Locked' : 'Book Spot'}
+                      {bookingInProgress === slot._id ? 'Securing Spot...' : 'Book Spot'}
                     </button>
                   )}
                 </div>

@@ -68,6 +68,25 @@ router.get('/me', protect, async (req, res) => {
       status = 'expired';
     }
 
+    // Fetch user bookings to calculate preferred slot and history
+    const Booking = (await import('../models/Booking.js')).default;
+    const bookings = await Booking.find({ userId: req.user._id });
+    
+    let mostBookedSlot = undefined;
+    if (bookings.length > 0) {
+      const hourCounts = {};
+      bookings.forEach(b => {
+        hourCounts[b.hour] = (hourCounts[b.hour] || 0) + 1;
+      });
+      let maxCount = -1;
+      Object.keys(hourCounts).forEach(h => {
+        if (hourCounts[h] > maxCount) {
+          maxCount = hourCounts[h];
+          mostBookedSlot = parseInt(h, 10);
+        }
+      });
+    }
+
     res.json({
       _id: membership._id,
       plan: membership.plan,
@@ -75,7 +94,11 @@ router.get('/me', protect, async (req, res) => {
       endDate: membership.endDate,
       status,
       amount: membership.amount,
-      daysLeft
+      daysLeft,
+      userStreakCurrent: req.user.streakCurrent || 0,
+      userStreakMax: req.user.streakMax || 0,
+      userTotalSessions: req.user.totalSessionsAttended || 0,
+      mostBookedSlot
     });
   } catch (error) {
     console.error('Error fetching membership profile:', error);
@@ -199,6 +222,68 @@ router.post('/verify-payment', protect, async (req, res) => {
   } catch (error) {
     console.error('Error verifying payment:', error);
     res.status(500).json({ message: error.message || 'Payment verification failed' });
+  }
+});
+
+// @desc    Get admin analytics data
+// @route   GET /api/membership/analytics
+// @access  Private (Admin only)
+router.get('/analytics', protect, async (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ message: 'Not authorized as admin' });
+  }
+}, async (req, res) => {
+  try {
+    const memberships = await Membership.find({});
+    
+    let revenueData = { monthly: 0, quarterly: 0, yearly: 0, total: 0 };
+    memberships.forEach(m => {
+      const planName = m.plan === 'yearly' ? 'yearly' : m.plan;
+      if (revenueData[planName] !== undefined) {
+        revenueData[planName] += m.amount;
+      }
+      revenueData.total += m.amount;
+    });
+
+    const activeCount = await Membership.countDocuments({ status: 'active' });
+    const expiredCount = await Membership.countDocuments({ status: 'expired' });
+    const membershipCounts = [
+      { name: 'Active Memberships', value: activeCount },
+      { name: 'Expired Memberships', value: expiredCount }
+    ];
+
+    const bookings = await Booking.find({});
+    const hourCounts = Array.from({ length: 24 }).map((_, i) => ({ hour: i, count: 0 }));
+    bookings.forEach(b => {
+      if (b.hour >= 0 && b.hour < 24) {
+        hourCounts[b.hour].count += 1;
+      }
+    });
+
+    const peakHoursData = hourCounts.filter(h => h.hour >= 6 && h.hour <= 21).map(h => {
+      const ampm = h.hour >= 12 ? 'PM' : 'AM';
+      const dispHr = h.hour > 12 ? h.hour - 12 : h.hour === 0 ? 12 : h.hour;
+      return {
+        name: `${dispHr}:00 ${ampm}`,
+        bookings: h.count
+      };
+    });
+
+    res.json({
+      revenue: [
+        { name: 'Monthly Plan', value: revenueData.monthly },
+        { name: 'Quarterly Plan', value: revenueData.quarterly },
+        { name: 'Annual Plan', value: revenueData.yearly }
+      ],
+      totalRevenue: revenueData.total,
+      memberships: membershipCounts,
+      peakHours: peakHoursData
+    });
+  } catch (error) {
+    console.error('Error fetching admin stats:', error);
+    res.status(500).json({ message: 'Server error retrieving analytics stats' });
   }
 });
 

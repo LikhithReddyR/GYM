@@ -2,9 +2,27 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { useAuth } from '../context/AuthContext';
 import { CameraIcon, CheckIcon, ClockIcon } from '../components/Icons';
+import { useToast } from '../components/Toast';
+
+const StaffScannerSkeleton = () => {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="glass-card" style={{ height: '80px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ width: '60%' }}>
+            <div className="skeleton" style={{ height: '18px', width: '40%', marginBottom: '6px' }}></div>
+            <div className="skeleton" style={{ height: '14px', width: '60%' }}></div>
+          </div>
+          <div className="skeleton" style={{ height: '32px', width: '80px', borderRadius: '6px' }}></div>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const StaffScanner = () => {
   const { apiCall } = useAuth();
+  const toast = useToast();
   const [scanMode, setScanMode] = useState('camera'); // 'camera' | 'simulator'
   const [manualToken, setManualToken] = useState('');
   const [verifying, setVerifying] = useState(false);
@@ -12,7 +30,6 @@ const StaffScanner = () => {
   const [activeBookingsList, setActiveBookingsList] = useState([]);
   const [loadingActive, setLoadingActive] = useState(true);
   const [scanAnimation, setScanAnimation] = useState(''); // 'scanning' | 'success' | 'error' | ''
-  const [alert, setAlert] = useState(null);
 
   const isScanningRef = useRef(false);
 
@@ -21,39 +38,6 @@ const StaffScanner = () => {
     setScanAnimation('');
     setManualToken('');
     isScanningRef.current = false;
-  };
-
-  // Fetch pending check-ins for the day (for ease of testing check-in flow!)
-  const fetchAllBookingsForToday = async () => {
-    try {
-      // In a real app we might fetch all bookings, but here we can make a query
-      // or we can fetch a helper list. Let's make an endpoint helper, or just list user's bookings.
-      // We can fetch from GET /api/bookings/me, or write a quick general endpoint if admin/staff,
-      // but let's query all bookings for today to show in the list.
-      // Wait, let's look at what bookings we have. Let's create an endpoint on backend or fetch from all.
-      // Since staff are authenticated, we can fetch all bookings or just use a helper.
-      // Let's implement a backend route on `/bookings/verify` or similar, or just fetch all bookings.
-      // Let's call `/bookings/me` but wait, this gets the current logged-in staff's bookings.
-      // What if we just fetch from `/slots` to find bookings, or fetch a general bookings list?
-      // Ah! We can write an endpoint in `bookings.js` for staff to fetch today's bookings:
-      // Let's verify if we need it. Yes! Let's let staff retrieve today's bookings list to easily scan them.
-      // Let's write a backend endpoint: `GET /api/bookings` (Staff only) to list all bookings.
-      // Wait! Let's check if we can add `GET /api/bookings` in `server/src/routes/bookings.js` so staff can fetch it.
-      // Let's do that! That is very clean.
-      // But for now, let's write `StaffScanner.jsx` and then add that endpoint to the backend.
-      const res = await apiCall('/bookings/me'); // fallback if no other endpoint
-      if (res.ok) {
-        const data = await res.json();
-        // Filter those that are not checked in yet and are for today
-        const todayStr = new Date().toLocaleDateString('en-CA');
-        const pending = data.filter(b => b.date === todayStr && !b.checkedIn);
-        // Wait, bookings/me only returns the logged-in user's bookings.
-        // Let's make a request to GET /api/bookings (which we will add for staff shortly).
-        // Let's fetch from /api/bookings if staff, else bookings/me.
-      }
-    } catch (err) {
-      console.error(err);
-    }
   };
 
   const fetchStaffPendingList = async () => {
@@ -78,7 +62,7 @@ const StaffScanner = () => {
 
   const handleVerifyToken = async (tokenToVerify) => {
     if (!tokenToVerify) {
-      showAlert('error', 'Please enter or scan a valid token');
+      toast.error('Please enter or scan a valid token');
       return;
     }
 
@@ -86,7 +70,7 @@ const StaffScanner = () => {
     setScanResult(null);
     setScanAnimation('scanning');
 
-    // Simulate 1s scan laser delay for beautiful UX
+    // Simulate 1.2s scan laser delay for beautiful UX
     setTimeout(async () => {
       try {
         const res = await apiCall('/bookings/verify', {
@@ -104,7 +88,7 @@ const StaffScanner = () => {
             booking: data.booking
           });
           setScanAnimation('success');
-          showAlert('success', 'Access Granted: Check-in complete!');
+          toast.success('Access Granted: Check-in complete!');
           fetchStaffPendingList();
         } else {
           setScanResult({
@@ -112,7 +96,7 @@ const StaffScanner = () => {
             message: data.message || 'Verification failed. Pass is invalid.'
           });
           setScanAnimation('error');
-          showAlert('error', data.message || 'Verification failed');
+          toast.error(data.message || 'Verification failed');
         }
       } catch (err) {
         setScanResult({
@@ -120,7 +104,7 @@ const StaffScanner = () => {
           message: err.message || 'Connection error checking token'
         });
         setScanAnimation('error');
-        showAlert('error', err.message || 'Connection error');
+        toast.error(err.message || 'Connection error');
       } finally {
         setVerifying(false);
       }
@@ -131,11 +115,6 @@ const StaffScanner = () => {
   const handleAutoScanBooking = (fullBookingToken) => {
     setManualToken(fullBookingToken);
     handleVerifyToken(fullBookingToken);
-  };
-
-  const showAlert = (type, message) => {
-    setAlert({ type, message });
-    setTimeout(() => setAlert(null), 4000);
   };
 
   // Mount real HTML5 camera scanner
@@ -159,7 +138,7 @@ const StaffScanner = () => {
               await handleVerifyToken(decodedText);
             },
             (error) => {
-              // ignore scan failures (e.g. no code in frame)
+              // ignore scan failures
             }
           );
         } catch (err) {
@@ -187,9 +166,46 @@ const StaffScanner = () => {
 
   return (
     <div className="dashboard-container" style={{ maxWidth: '900px' }}>
-      {alert && (
-        <div className={`alert-toast ${alert.type}`} style={{ position: 'fixed', top: '100px', right: '20px', zIndex: 9999 }}>
-          <span>{alert.message}</span>
+      
+      {/* FULLSCREEN SCAN RESULT OVERLAYS */}
+      {scanResult && (
+        <div className={`fullscreen-overlay ${scanResult.success ? 'success' : 'error'}`}>
+          <div className={`fullscreen-icon-circle ${scanResult.success ? 'success' : 'error'}`}>
+            {scanResult.success ? (
+              <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            )}
+          </div>
+          
+          <h1 className="fullscreen-title">
+            {scanResult.success ? 'ACCESS GRANTED' : 'ACCESS DENIED'}
+          </h1>
+          <p className="fullscreen-message">
+            {scanResult.message}
+          </p>
+          
+          {scanResult.success && scanResult.user && (
+            <div style={{
+              fontSize: '1.2rem',
+              background: 'rgba(0,0,0,0.15)',
+              padding: '20px',
+              borderRadius: '12px',
+              marginBottom: '30px',
+              maxWidth: '500px',
+              textAlign: 'left'
+            }}>
+              <div>Attendee: <strong>{scanResult.user.name}</strong></div>
+              <div>Email: {scanResult.user.email}</div>
+              <div style={{ marginTop: '8px' }}>
+                Slot: <strong>{formatHourString(scanResult.booking.hour)}</strong> ({scanResult.booking.date})
+              </div>
+            </div>
+          )}
+
+          <button className="fullscreen-btn" onClick={handleScanAgain}>
+            Scan Next Pass
+          </button>
         </div>
       )}
 
@@ -230,16 +246,6 @@ const StaffScanner = () => {
                 <p style={{ fontSize: '0.95rem', marginBottom: '8px', fontWeight: 500 }}>
                   {scanResult.message}
                 </p>
-                
-                {scanResult.success && scanResult.user && (
-                  <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
-                    <div>Attendee: <strong>{scanResult.user.name}</strong></div>
-                    <div>Email: {scanResult.user.email}</div>
-                    <div style={{ marginTop: '4px' }}>
-                      Slot: <strong>{formatHourString(scanResult.booking.hour)}</strong> ({scanResult.booking.date})
-                    </div>
-                  </div>
-                )}
               </div>
 
               <button 
@@ -315,9 +321,7 @@ const StaffScanner = () => {
           </p>
 
           {loadingActive ? (
-            <div style={{ color: 'var(--color-text-muted)', textAlign: 'center', padding: '40px 0' }}>
-              <span>Loading current bookings...</span>
-            </div>
+            <StaffScannerSkeleton />
           ) : activeBookingsList.length === 0 ? (
             <div style={{ color: 'var(--color-text-dim)', textAlign: 'center', padding: '40px 0', border: '1px dashed var(--border-glass)', borderRadius: '8px' }}>
               <span>No bookings made for today yet. Use a user account to book a slot first!</span>
@@ -348,35 +352,14 @@ const StaffScanner = () => {
                         Checked In
                       </span>
                     ) : (
-                      // We need to fetch the real booking tokens. Wait, the GET /api/bookings/me route returns bookings.
-                      // How does staff get the token of this booking?
-                      // If we are testing with the same user, the bookings list contains their own qrToken? No,
-                      // let's make sure that for testing ease, we can store the qrToken in the frontend list, or fetch it.
-                      // Wait! The GET /api/bookings/me list returns `{ _id, date, hour, checkedIn, qrCode, qrToken }` (or similar)
-                      // wait, in the routes file, bookings/me returned `{ _id, slotId, date, hour, checkedIn, qrCode }`, and does NOT include the raw `qrToken`.
-                      // Oh! If it doesn't include the raw `qrToken`, how can we copy-paste it?
-                      // Ah, we can modify the backend to include `qrToken` in the response of `GET /api/bookings/me` so that users and staff can easily see the token for manual scanning testing! This is an excellent addition for testing and debugging.
-                      // Wait, did we return `qrToken` in `GET /api/bookings/me`? Let's check `routes/bookings.js`.
-                      // In `routes/bookings.js` lines 18-29:
-                      // `return { _id: booking._id, slotId: booking.slotId, date: booking.date, hour: booking.hour, timestamp: booking.timestamp, checkedIn: booking.checkedIn, qrCode };`
-                      // It omitted `qrToken`!
-                      // Let's modify `routes/bookings.js` to also return `qrToken: booking.qrToken`.
-                      // Then we can display the token in the My Bookings page and retrieve it in the staff helper list. That will make testing 100x easier!
-                      // Let's write the staff scanner, and then we will update the bookings route to include `qrToken`.
-                      // In this staff list, if the booking does not show a test token, we can just say "Please copy token from My Bookings".
-                      // Wait, let's make sure we show a button "Scan & Verify" that uses the token. To do this, let's fetch the list of bookings with their tokens.
                       <button 
                         className="btn btn-secondary" 
                         style={{ padding: '6px 12px', fontSize: '0.8rem' }}
                         onClick={() => {
-                          // If we have booking.qrToken (which we will add), we pass it.
-                          // If we don't, we can show a placeholder or let the user copy it.
                           if (booking.qrToken) {
                             handleAutoScanBooking(booking.qrToken);
                           } else {
-                            // If we don't have it, let's fetch from localStorage or alert
-                            // We will update the route to return `qrToken` so it will definitely be present!
-                            showAlert('info', 'Updating token database...');
+                            toast.info('Wait, token not loaded. Refreshing...');
                           }
                         }}
                       >

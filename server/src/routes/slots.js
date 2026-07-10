@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import QRCode from 'qrcode';
 import TimeSlot from '../models/TimeSlot.js';
 import Booking from '../models/Booking.js';
+import User from '../models/User.js';
+import Membership from '../models/Membership.js';
 import { protect, checkMembership } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -17,18 +19,14 @@ router.get('/', protect, async (req, res) => {
     return res.status(400).json({ message: 'Date parameter is required (YYYY-MM-DD)' });
   }
 
-  // Basic regex validation for YYYY-MM-DD
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
   if (!dateRegex.test(date)) {
     return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD.' });
   }
 
   try {
-    // Attempt to find existing slots for the date
     let slots = await TimeSlot.find({ date }).sort({ hour: 1 });
 
-    // Auto-seed slots for the date if none exist
-    // Fixed operating hours: 6 AM to 10 PM (16 slots: 6:00 to 21:00 starting hours)
     if (slots.length === 0) {
       const defaultSlots = [];
       for (let hr = 6; hr <= 21; hr++) {
@@ -36,15 +34,14 @@ router.get('/', protect, async (req, res) => {
           date,
           hour: hr,
           capacity: 30,
-          bookedCount: 0
+          bookedCount: 0,
+          waitlist: []
         });
       }
       
       try {
-        // Bulk write to DB (with ordered: false to skip duplicate insertions if another request races it)
         slots = await TimeSlot.insertMany(defaultSlots, { ordered: false });
       } catch (err) {
-        // In case of race conditions during concurrent seedings, fetch what was seeded by the competing request
         slots = await TimeSlot.find({ date }).sort({ hour: 1 });
       }
     }
@@ -56,10 +53,146 @@ router.get('/', protect, async (req, res) => {
   }
 });
 
-// @desc    Book a slot (Membership gated & Atomic capacity gated)
+// @desc    Book a slot (Membership gated, optional Book-with-a-friend tag & Atomic capacity gated)
 // @route   POST /api/slots/:id/book
 // @access  Private (Membership active)
 router.post('/:id/book', protect, checkMembership, async (req, res) => {
+  const slotId = req.params.id;
+  const userId = req.user._id;
+  const { friendEmail } = req.body;
+
+  try {
+    const slot = await TimeSlot.findById(slotId);
+    if (!slot) {
+      return res.status(404).json({ message: 'Time slot not found' });
+    }
+
+    // Step 1: Check user's own double booking
+    const existingBooking = await Booking.findOne({ userId, slotId });
+    if (existingBooking) {
+      return res.status(400).json({ message: 'You have already booked this time slot' });
+    }
+
+    const duplicateTimeBooking = await Booking.findOne({ userId, date: slot.date, hour: slot.hour });
+    if (duplicateTimeBooking) {
+      return res.status(400).json({ message: 'You have already booked a gym slot at this hour' });
+    }
+
+    // Handle Book-with-a-friend logic if tag present
+    let friend = null;
+    if (friendEmail) {
+      const normalizedEmail = friendEmail.trim().toLowerCase();
+      if (normalizedEmail === req.user.email.toLowerCase()) {
+        return res.status(400).json({ message: 'You cannot tag yourself as a friend' });
+      }
+
+      friend = await User.findOne({ email: normalizedEmail });
+      if (!friend) {
+        return res.status(400).json({ message: `Friend with email ${friendEmail} not found` });
+      }
+
+      // Check friend's membership
+      const friendMembership = await Membership.findOne({ userId: friend._id });
+      const now = new Date();
+      if (!friendMembership || friendMembership.status !== 'active' || friendMembership.endDate < now) {
+        return res.status(400).json({ message: 'Friend does not have an active gym membership plan' });
+      }
+
+      // Check friend double booking
+      const friendExistingBooking = await Booking.findOne({ userId: friend._id, slotId });
+      if (friendExistingBooking) {
+        return res.status(400).json({ message: 'Friend has already booked this time slot' });
+      }
+
+      const friendDuplicateTime = await Booking.findOne({ userId: friend._id, date: slot.date, hour: slot.hour });
+      if (friendDuplicateTime) {
+        return res.status(400).json({ message: 'Friend has already booked a gym slot at this hour' });
+      }
+    }
+
+    // Step 2: Atomic update to check capacity and increment count
+    const incrementAmount = friend ? 2 : 1;
+    const updatedSlot = await TimeSlot.findOneAndUpdate(
+      { _id: slotId, bookedCount: { $lte: slot.capacity - incrementAmount } },
+      { $inc: { bookedCount: incrementAmount } },
+      { new: true }
+    );
+
+    if (!updatedSlot) {
+      return res.status(400).json({ message: friend ? 'Not enough capacity left for two bookings' : 'Slot already full' });
+    }
+
+    // Emit live updates via Socket.io
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('slotUpdate', updatedSlot);
+    }
+
+    // Step 3: Create Booking signatures
+    const slotDayEnd = new Date(`${slot.date}T23:59:59`);
+    const diffSeconds = Math.max(300, Math.ceil((slotDayEnd.getTime() - new Date().getTime()) / 1000));
+
+    // User Booking creation
+    const userPayload = { userId: userId.toString(), slotId: slot._id.toString(), date: slot.date, hour: slot.hour };
+    const userToken = jwt.sign(userPayload, process.env.JWT_SECRET || 'super_secret_jwt_token_key_for_gym_facility_12345', { expiresIn: diffSeconds });
+    const userQr = await QRCode.toDataURL(userToken);
+
+    const userBooking = await Booking.create({
+      userId,
+      slotId,
+      date: slot.date,
+      hour: slot.hour,
+      qrToken: userToken,
+      checkedIn: false,
+      friendUserId: friend ? friend._id : null
+    });
+
+    let friendBookingDetails = null;
+    if (friend) {
+      // Friend Booking creation
+      const friendPayload = { userId: friend._id.toString(), slotId: slot._id.toString(), date: slot.date, hour: slot.hour };
+      const friendToken = jwt.sign(friendPayload, process.env.JWT_SECRET || 'super_secret_jwt_token_key_for_gym_facility_12345', { expiresIn: diffSeconds });
+      
+      const friendBooking = await Booking.create({
+        userId: friend._id,
+        slotId,
+        date: slot.date,
+        hour: slot.hour,
+        qrToken: friendToken,
+        checkedIn: false,
+        friendUserId: userId
+      });
+
+      friendBookingDetails = {
+        _id: friendBooking._id,
+        name: friend.name,
+        email: friend.email
+      };
+    }
+
+    res.status(201).json({
+      message: friend ? 'Booked successfully for you and your friend!' : 'Booking successful',
+      booking: {
+        _id: userBooking._id,
+        date: userBooking.date,
+        hour: userBooking.hour,
+        checkedIn: userBooking.checkedIn,
+        timestamp: userBooking.timestamp,
+        friend: friendBookingDetails
+      },
+      qrCode: userQr
+    });
+
+  } catch (error) {
+    console.error('Booking error:', error);
+    res.status(500).json({ message: error.message || 'Error occurred while booking slot' });
+  }
+});
+
+// @desc    Join a slot waitlist
+// @route   POST /api/slots/:id/waitlist
+// @access  Private (Membership active)
+router.post('/:id/waitlist', protect, checkMembership, async (req, res) => {
   const slotId = req.params.id;
   const userId = req.user._id;
 
@@ -69,86 +202,34 @@ router.post('/:id/book', protect, checkMembership, async (req, res) => {
       return res.status(404).json({ message: 'Time slot not found' });
     }
 
-    // Step 1: Check if the user has already booked this slot before modifying anything
+    // Check if slot is actually full
+    if (slot.bookedCount < slot.capacity) {
+      return res.status(400).json({ message: 'Slot is not full yet. Book directly.' });
+    }
+
+    // Check if user is already on waitlist
+    const isOnWaitlist = slot.waitlist.some(item => item.userId.toString() === userId.toString());
+    if (isOnWaitlist) {
+      return res.status(400).json({ message: 'You are already on the waitlist for this slot' });
+    }
+
+    // Check if user has booking
     const existingBooking = await Booking.findOne({ userId, slotId });
     if (existingBooking) {
       return res.status(400).json({ message: 'You have already booked this time slot' });
     }
 
-    // Step 1b: Check if they already booked a slot at the exact same hour/date
-    const duplicateTimeBooking = await Booking.findOne({ userId, date: slot.date, hour: slot.hour });
-    if (duplicateTimeBooking) {
-      return res.status(400).json({ message: 'You have already booked a gym slot at this hour' });
-    }
+    slot.waitlist.push({ userId });
+    await slot.save();
 
-    // Step 2: Atomic update to check capacity and increment count
-    const updatedSlot = await TimeSlot.findOneAndUpdate(
-      { _id: slotId, bookedCount: { $lt: slot.capacity } },
-      { $inc: { bookedCount: 1 } },
-      { new: true }
-    );
-
-    if (!updatedSlot) {
-      return res.status(400).json({ message: 'Slot already full — capacity reached (30/30)' });
-    }
-
-    // Step 3: Create JWT and base64 QR Code
-    // Set token expiration to the end of that day (11:59:59 PM in slot's local timezone / UTC representation)
-    const slotDayEnd = new Date(`${slot.date}T23:59:59`);
-    const now = new Date();
-    const diffSeconds = Math.max(300, Math.ceil((slotDayEnd.getTime() - now.getTime()) / 1000)); // Min 5 min buffer
-
-    const tokenPayload = {
-      userId: userId.toString(),
-      slotId: slot._id.toString(),
-      date: slot.date,
-      hour: slot.hour
-    };
-
-    const qrToken = jwt.sign(
-      tokenPayload,
-      process.env.JWT_SECRET || 'super_secret_jwt_token_key_for_gym_facility_12345',
-      { expiresIn: diffSeconds }
-    );
-
-    // Generate base64 QR code image
-    const qrCodeBase64 = await QRCode.toDataURL(qrToken);
-
-    // Step 4: Write Booking document
-    try {
-      const booking = await Booking.create({
-        userId,
-        slotId,
-        date: slot.date,
-        hour: slot.hour,
-        qrToken,
-        checkedIn: false
-      });
-
-      res.status(201).json({
-        message: 'Booking successful',
-        booking: {
-          _id: booking._id,
-          date: booking.date,
-          hour: booking.hour,
-          checkedIn: booking.checkedIn,
-          timestamp: booking.timestamp
-        },
-        qrCode: qrCodeBase64
-      });
-    } catch (dbError) {
-      // Step 5: Rollback atomic capacity count in case of double-booking write index failure
-      await TimeSlot.updateOne({ _id: slotId }, { $inc: { bookedCount: -1 } });
-
-      if (dbError.code === 11000) {
-        return res.status(400).json({ message: 'Double-booking prevention: You have already booked this slot.' });
-      }
-      throw dbError;
-    }
-
+    res.json({
+      success: true,
+      message: 'Successfully added to waitlist!',
+      position: slot.waitlist.length
+    });
   } catch (error) {
-    console.error('Booking error:', error);
-    res.status(500).json({ message: error.message || 'Error occurred while booking slot' });
+    console.error('Waitlist error:', error);
+    res.status(500).json({ message: error.message || 'Error joining waitlist' });
   }
 });
 

@@ -18,14 +18,29 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true
   },
-  role: {
-    type: String,
-    enum: ['user', 'staff', 'admin'],
-    default: 'user'
-  }
-}, {
-  timestamps: true
-});
+    role: {
+      type: String,
+      enum: ['user', 'staff', 'admin'],
+      default: 'user'
+    },
+    streakCurrent: {
+      type: Number,
+      default: 0
+    },
+    streakMax: {
+      type: Number,
+      default: 0
+    },
+    lastCheckInDate: {
+      type: String // YYYY-MM-DD
+    },
+    totalSessionsAttended: {
+      type: Number,
+      default: 0
+    }
+  }, {
+    timestamps: true
+  });
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {

@@ -32,6 +32,10 @@ const membershipSchema = new mongoose.Schema({
   amount: {
     type: Number,
     required: true
+  },
+  autoRenew: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true

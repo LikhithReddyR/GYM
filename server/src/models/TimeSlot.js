@@ -18,7 +18,20 @@ const timeSlotSchema = new mongoose.Schema({
     type: Number,
     required: true,
     default: 0
-  }
+  },
+  waitlist: [
+    {
+      userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+      },
+      timestamp: {
+        type: Date,
+        default: Date.now
+      }
+    }
+  ]
 }, {
   timestamps: true
 });
