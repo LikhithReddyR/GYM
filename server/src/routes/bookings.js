@@ -50,7 +50,7 @@ router.get('/me', protect, async (req, res) => {
 // @access  Private (Staff only)
 router.get('/all', protect, isStaff, async (req, res) => {
   const { date } = req.query;
-  const targetDate = date || new Date().toLocaleDateString('en-CA');
+  const targetDate = date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   try {
     const bookings = await Booking.find({ date: targetDate })
       .populate('userId', 'name email')
@@ -133,7 +133,7 @@ router.post('/verify', protect, isStaff, async (req, res) => {
 
     // 4. Current date and hour match gate
     // Date format: YYYY-MM-DD
-    const todayStr = new Date().toLocaleDateString('en-CA'); // Format: YYYY-MM-DD (ISO/local)
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // Format: YYYY-MM-DD (ISO/local)
     
     // Check if the booking is for today
     if (booking.date !== todayStr) {
@@ -144,9 +144,10 @@ router.post('/verify', protect, isStaff, async (req, res) => {
 
     // Check if the current hour is within booking window
     // (We allow entry during the booked hour, or up to 15 minutes before the booked hour)
-    const currentHour = new Date().getHours();
+    const currentHour = parseInt(new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour12: false, hour: 'numeric' }), 10);
+    const currentMinutes = parseInt(new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour12: false, minute: 'numeric' }), 10);
     const isHourMatch = currentHour === booking.hour;
-    const isEarlyBuffer = (currentHour === booking.hour - 1) && (new Date().getMinutes() >= 45); // 15 mins early buffer
+    const isEarlyBuffer = (currentHour === booking.hour - 1) && (currentMinutes >= 45); // 15 mins early buffer
 
     if (!isHourMatch && !isEarlyBuffer) {
       return res.status(400).json({

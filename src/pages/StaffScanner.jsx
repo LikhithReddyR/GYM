@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
 import { useAuth } from '../context/AuthContext';
 import { CameraIcon, CheckIcon, ClockIcon } from '../components/Icons';
@@ -13,6 +13,15 @@ const StaffScanner = () => {
   const [loadingActive, setLoadingActive] = useState(true);
   const [scanAnimation, setScanAnimation] = useState(''); // 'scanning' | 'success' | 'error' | ''
   const [alert, setAlert] = useState(null);
+
+  const isScanningRef = useRef(false);
+
+  const handleScanAgain = () => {
+    setScanResult(null);
+    setScanAnimation('');
+    setManualToken('');
+    isScanningRef.current = false;
+  };
 
   // Fetch pending check-ins for the day (for ease of testing check-in flow!)
   const fetchAllBookingsForToday = async () => {
@@ -132,7 +141,8 @@ const StaffScanner = () => {
   // Mount real HTML5 camera scanner
   useEffect(() => {
     let scanner = null;
-    if (scanMode === 'camera') {
+    if (scanMode === 'camera' && !scanResult && !verifying) {
+      isScanningRef.current = false;
       const timer = setTimeout(() => {
         try {
           scanner = new Html5QrcodeScanner('qr-reader', {
@@ -143,6 +153,8 @@ const StaffScanner = () => {
 
           scanner.render(
             async (decodedText) => {
+              if (isScanningRef.current) return;
+              isScanningRef.current = true;
               setManualToken(decodedText);
               await handleVerifyToken(decodedText);
             },
@@ -162,7 +174,7 @@ const StaffScanner = () => {
         }
       };
     }
-  }, [scanMode]);
+  }, [scanMode, scanResult, verifying]);
 
   const formatHourString = (hr) => {
     const ampm = hr >= 12 ? 'PM' : 'AM';
@@ -204,82 +216,94 @@ const StaffScanner = () => {
             </button>
           </div>
 
-          {scanMode === 'camera' ? (
-            <div className="glass-card" style={{ padding: '16px', marginBottom: '24px', background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-glass)' }}>
-              <div id="qr-reader" style={{ width: '100%', borderRadius: '8px', overflow: 'hidden' }}></div>
+          {scanResult ? (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <div className="glass-card" style={{
+                marginBottom: '24px',
+                padding: '20px',
+                textAlign: 'left',
+                borderLeft: `5px solid ${scanResult.success ? 'var(--color-success)' : 'var(--color-danger)'}`
+              }}>
+                <h3 style={{ color: scanResult.success ? 'var(--color-success)' : 'var(--color-danger)', marginBottom: '8px' }}>
+                  {scanResult.success ? 'Access Granted' : 'Access Denied'}
+                </h3>
+                <p style={{ fontSize: '0.95rem', marginBottom: '8px', fontWeight: 500 }}>
+                  {scanResult.message}
+                </p>
+                
+                {scanResult.success && scanResult.user && (
+                  <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
+                    <div>Attendee: <strong>{scanResult.user.name}</strong></div>
+                    <div>Email: {scanResult.user.email}</div>
+                    <div style={{ marginTop: '4px' }}>
+                      Slot: <strong>{formatHourString(scanResult.booking.hour)}</strong> ({scanResult.booking.date})
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <button 
+                className="btn btn-primary" 
+                style={{ width: '100%', padding: '12px' }}
+                onClick={handleScanAgain}
+              >
+                Scan Next Pass
+              </button>
             </div>
           ) : (
-            <div className={`scanner-feed ${
-              scanAnimation === 'success' ? 'success-pulse' : 
-              scanAnimation === 'error' ? 'error-pulse' : ''
-            }`} style={{ marginBottom: '24px' }}>
-              {scanAnimation === 'scanning' && <div className="scanner-laser"></div>}
-              
-              <div className="scanner-target-box" style={{
-                borderColor: scanAnimation === 'success' ? 'var(--color-success)' :
-                             scanAnimation === 'error' ? 'var(--color-danger)' : 'rgba(255, 255, 255, 0.25)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}>
-                <CameraIcon style={{
-                  width: '48px',
-                  height: '48px',
-                  color: scanAnimation === 'success' ? 'var(--color-success)' :
-                         scanAnimation === 'error' ? 'var(--color-danger)' : 'var(--color-text-dim)'
-                }} />
-              </div>
+            <>
+              {scanMode === 'camera' ? (
+                <div className="glass-card" style={{ padding: '16px', marginBottom: '24px', background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-glass)' }}>
+                  <div id="qr-reader" style={{ width: '100%', borderRadius: '8px', overflow: 'hidden' }}></div>
+                </div>
+              ) : (
+                <div className={`scanner-feed ${
+                  scanAnimation === 'success' ? 'success-pulse' : 
+                  scanAnimation === 'error' ? 'error-pulse' : ''
+                }`} style={{ marginBottom: '24px' }}>
+                  {scanAnimation === 'scanning' && <div className="scanner-laser"></div>}
+                  
+                  <div className="scanner-target-box" style={{
+                    borderColor: scanAnimation === 'success' ? 'var(--color-success)' :
+                                 scanAnimation === 'error' ? 'var(--color-danger)' : 'rgba(255, 255, 255, 0.25)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <CameraIcon style={{
+                      width: '48px',
+                      height: '48px',
+                      color: scanAnimation === 'success' ? 'var(--color-success)' :
+                             scanAnimation === 'error' ? 'var(--color-danger)' : 'var(--color-text-dim)'
+                    }} />
+                  </div>
 
-              <div style={{ position: 'absolute', bottom: '15px', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-                {scanAnimation === 'scanning' ? 'Scanning Token Signature...' :
-                 scanAnimation === 'success' ? 'CHECK-IN CONFIRMED ✔' :
-                 scanAnimation === 'error' ? 'ACCESS DENIED ✘' : 'Simulator Idle — Ready to Scan'}
-              </div>
-            </div>
-          )}
-
-          <div className="scanner-manual-input">
-            <input
-              type="text"
-              className="input-field"
-              placeholder="Paste JWT pass token here..."
-              value={manualToken}
-              onChange={(e) => setManualToken(e.target.value)}
-              disabled={verifying}
-            />
-            <button 
-              className="btn btn-primary" 
-              onClick={() => handleVerifyToken(manualToken)}
-              disabled={verifying}
-            >
-              {verifying ? 'Verifying...' : 'Submit'}
-            </button>
-          </div>
-
-          {/* Verification Results Panel */}
-          {scanResult && (
-            <div className="glass-card" style={{
-              marginTop: '24px',
-              padding: '20px',
-              borderLeft: `5px solid ${scanResult.success ? 'var(--color-success)' : 'var(--color-danger)'}`
-            }}>
-              <h3 style={{ color: scanResult.success ? 'var(--color-success)' : 'var(--color-danger)', marginBottom: '8px' }}>
-                {scanResult.success ? 'Access Granted' : 'Access Denied'}
-              </h3>
-              <p style={{ fontSize: '0.95rem', marginBottom: '8px', fontWeight: 500 }}>
-                {scanResult.message}
-              </p>
-              
-              {scanResult.success && scanResult.user && (
-                <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
-                  <div>Attendee: <strong>{scanResult.user.name}</strong></div>
-                  <div>Email: {scanResult.user.email}</div>
-                  <div style={{ marginTop: '4px' }}>
-                    Slot: <strong>{formatHourString(scanResult.booking.hour)}</strong> ({scanResult.booking.date})
+                  <div style={{ position: 'absolute', bottom: '15px', fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                    {scanAnimation === 'scanning' ? 'Scanning Token Signature...' :
+                     scanAnimation === 'success' ? 'CHECK-IN CONFIRMED ✔' :
+                     scanAnimation === 'error' ? 'ACCESS DENIED ✘' : 'Simulator Idle — Ready to Scan'}
                   </div>
                 </div>
               )}
-            </div>
+
+              <div className="scanner-manual-input">
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="Paste JWT pass token here..."
+                  value={manualToken}
+                  onChange={(e) => setManualToken(e.target.value)}
+                  disabled={verifying}
+                />
+                <button 
+                  className="btn btn-primary" 
+                  onClick={() => handleVerifyToken(manualToken)}
+                  disabled={verifying}
+                >
+                  {verifying ? 'Verifying...' : 'Submit'}
+                </button>
+              </div>
+            </>
           )}
         </div>
 
