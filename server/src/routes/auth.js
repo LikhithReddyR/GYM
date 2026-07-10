@@ -26,9 +26,13 @@ router.post('/register', async (req, res) => {
 
     // Determine role based on secret code
     let role = 'user';
-    const configStaffSecret = process.env.STAFF_SECRET || 'GymStaffSecret2026';
-    if (staffSecret && staffSecret === configStaffSecret) {
-      role = 'staff';
+    if (staffSecret) {
+      const configStaffSecret = process.env.STAFF_SECRET || 'GymStaffSecret2026';
+      if (staffSecret === configStaffSecret) {
+        role = 'staff';
+      } else {
+        return res.status(400).json({ message: 'Invalid staff secret code' });
+      }
     }
 
     const user = await User.create({
